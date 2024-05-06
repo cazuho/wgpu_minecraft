@@ -14,7 +14,7 @@ use wasm_bindgen::prelude::*;
 mod camera;
 mod texture;
 
-const NUM_INSTANCES_PER_ROW: u32 = 50;
+const NUM_INSTANCES_PER_ROW: u32 = 10;
 
 #[repr(C)]
 #[derive(Copy, Clone, Debug, bytemuck::Pod, bytemuck::Zeroable)]
@@ -183,7 +183,6 @@ impl CameraUniform {
 
 struct Instance {
     position: cgmath::Vector3<f32>,
-    rotation: cgmath::Quaternion<f32>,
 }
 
 // NEW!
@@ -197,9 +196,7 @@ struct InstanceRaw {
 impl Instance {
     fn to_raw(&self) -> InstanceRaw {
         InstanceRaw {
-            model: (cgmath::Matrix4::from_translation(self.position)
-                * cgmath::Matrix4::from(self.rotation))
-            .into(),
+            model: cgmath::Matrix4::from_translation(self.position).into(),
         }
     }
 }
@@ -269,7 +266,6 @@ struct State {
     instance_buffer: wgpu::Buffer,
     depth_texture: texture::Texture,
     mouse_pressed: bool, // NEW!
-    counter: f32,        // NEW!
 }
 
 impl State {
@@ -386,9 +382,9 @@ impl State {
         let depth_texture =
             texture::Texture::create_depth_texture(&device, &config, "depth_texture");
 
+        let camera = camera::Camera::new((0.0, 5.0, 10.0), cgmath::Deg(-90.0), cgmath::Deg(-20.0));
         // UPDATED!
-        // let camera = camera::Camera::new((0.0, 5.0, 10.0), cgmath::Deg(-90.0), cgmath::Deg(-20.0));
-        let camera = camera::Camera::new((0.0, -40.0, 0.0), cgmath::Deg(0.0), cgmath::Deg(0.0));
+        // let camera = camera::Camera::new((0.0, -40.0, 0.0), cgmath::Deg(0.0), cgmath::Deg(0.0));
         let projection =
             camera::Projection::new(config.width, config.height, cgmath::Deg(45.0), 0.1, 100.0);
         let camera_controller = camera::CameraController::new(8.0, 1.0);
@@ -418,17 +414,11 @@ impl State {
                     let ny = (perlin.get([nx, 0.0, nz]) * HEIGHT_SCALE).round() as i32;
                     let x = SPACE_BETWEEN * (x as f32 - NUM_INSTANCES_PER_ROW as f32 / 2.0);
                     let z = SPACE_BETWEEN * (z as f32 - NUM_INSTANCES_PER_ROW as f32 / 2.0);
-
-                    let y = SPACE_BETWEEN * (ny as f32 - NUM_INSTANCES_PER_ROW as f32 / 2.0);
+                    let y = SPACE_BETWEEN * ny as f32;
 
                     let position = cgmath::Vector3 { x, y, z };
 
-                    let rotation = cgmath::Quaternion::from_axis_angle(
-                        cgmath::Vector3::unit_z(),
-                        cgmath::Deg(0.0),
-                    );
-
-                    Instance { position, rotation }
+                    Instance { position }
                 })
             })
             .collect::<Vec<_>>();
@@ -556,7 +546,6 @@ impl State {
             instance_buffer,
             depth_texture,
             mouse_pressed: false, // NEW!
-            counter: 0.0,         // NEW!
         }
     }
 
@@ -622,19 +611,51 @@ impl State {
         }
     }
 
-    fn add_instance_at_mouse_position(&mut self) {
-        // 2. 新しいインスタンスを作成し、座標を設定
-        let offset = self.counter * 2.0; // 2.0は立方体の幅を表します。
+    #[allow(dead_code)]
+    fn screen_to_world(&self, screen_position: (f32, f32)) -> cgmath::Vector3<f32> {
+        // スクリーンの幅と高さを取得
+        let screen_width = self.size.width as f32;
+        let screen_height = self.size.height as f32;
 
-        // SPACE_BETWEEN * (z as f32 - NUM_INSTANCES_PER_ROW as f32 / 2.0);
+        // スクリーン座標をNDCに変換
+        let x = (2.0 * screen_position.0) / screen_width - 1.0;
+        let y = 1.0 - (2.0 * screen_position.1) / screen_height;
+        let z = -1.0;
+        let ndc = cgmath::Vector3 { x, y, z };
+
+        // NDCをクリップ空間に変換
+        //let clip = ndc * 2.0 - cgmath::Vector3::new(1.0, 1.0, 1.0);
+
+        // クリップ空間をビュー空間に変換
+        let projection_inverse = self.projection.calc_matrix().invert().unwrap();
+        let view = projection_inverse * ndc.extend(1.0);
+
+        // ビュー空間をワールド座標に変換
+        let view_matrix = self.camera.calc_matrix();
+        let view_matrix_inverse = view_matrix.invert().unwrap();
+        let world = view_matrix_inverse * view;
+
+        world.truncate()
+    }
+
+    fn add_instance_at_mouse_position(&mut self) {
+        let camera_position = self.camera.position;
+        let camera_position =
+            cgmath::Vector3::new(camera_position.x, camera_position.y, camera_position.z);
+        let camera_direction = self.camera.direction();
+
+        //let ray_start = camera_position;
+        //let ray_end = camera_position + camera_direction * 10.0;
+
+        //let mut current_position = cgmath::Vector3::new(  (ray_start.x / 2.0).floor(),            (ray_start.y / 2.0).floor(),            (ray_start.z / 2.0).floor(),        ) * 2.0;
+
+        //let step = camera_direction.signum() * 2.0;
+
+        let position = camera_position + camera_direction * 2.0;
+        println!("New instance position: {:?}", position);
 
         let new_instance = Instance {
-            position: cgmath::Vector3::new(0.0, offset, 0.0),
-            // 回転角度
-            rotation: cgmath::Quaternion::from_axis_angle(
-                cgmath::Vector3::unit_z(),
-                cgmath::Deg(0.0),
-            ),
+            position, // UPDATED!
         };
 
         // 3. インスタンスを追加
@@ -653,9 +674,6 @@ impl State {
                 contents: bytemuck::cast_slice(&instance_data),
                 usage: wgpu::BufferUsages::VERTEX,
             });
-
-        // 5. カウンタを更新
-        self.counter += 1.0;
     }
 
     fn update(&mut self, dt: instant::Duration) {
